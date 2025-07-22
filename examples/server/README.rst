@@ -25,9 +25,6 @@ You can then browse to the following page with your browser:
 
 http://127.0.0.1:8080
 
-Note by Ruizhi: Must use 
-http://localhost:8080 or http://127.0.0.1:8080
-not 0.0.0.0:8080!
 
 Once you click `Start` the browser will send the audio and video from its
 webcam to the server.
@@ -54,3 +51,35 @@ The audio file "demo-instruct.wav" was borrowed from the Asterisk
 project. It is licensed as Creative Commons Attribution-Share Alike 3.0:
 
 https://wiki.asterisk.org/wiki/display/AST/Voice+Prompts+and+Music+on+Hold+License
+
+
+Note by Ruizhi: 
+
+1. If you want to run the clint locally at the brower, make sure to use 
+http://localhost:8080 or http://127.0.0.1:8080
+not 0.0.0.0:8080!
+
+2. If you want to run the client at the client device (e.g., phone), follow these steps:
+
+
+a.  **Generate Certificate on MacBook:**
+    * Open Terminal and navigate to the project folder.
+    * Run: `openssl req -x509 -newkey rsa:4096 -keyout key.pem -out cert.pem -sha256 -days 365 -nodes`
+
+b.  **Start Secure Server on MacBook:**
+    * In the same Terminal window, run:
+    * `python server.py --cert-file cert.pem --key-file key.pem`
+
+c.  **Connect from Android Device:**
+    * Ensure the Android device is connected to the MacBook's WiFi hotspot.
+    * Open the web browser on the Android device.
+    * Navigate to: `https://<Your-MacBook-IP>:8080`, e.g., https://192.168.2.1:8080 if your MacBook is AP 
+    * Note: You must use https://.
+
+d.  **Bypass Browser Security Warning:**
+    * When the "Your connection is not private" warning appears, select "Advanced".
+    * Choose to "Proceed to 192.168.2.1 (unsafe)".
+
+e.  **Start the Call:**
+    * The page should now load correctly.
+    * Click the "Start" button and grant microphone/camera permissions when prompted by the phone.
