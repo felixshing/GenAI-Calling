@@ -24,11 +24,6 @@ You can then browse to the following page with your browser:
 
 http://127.0.0.1:8080
 
-Note by Ruizhi: Must use 
-http://localhost:8080
-or 
-http://127.0.0.1:8080
-not 0.0.0.0:8080
 
 Once you click `Start` the server will send video from its webcam to the
 browser.
