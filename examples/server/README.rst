@@ -63,8 +63,8 @@ not 0.0.0.0:8080!
 
 
 a.  **Generate Certificate on MacBook:**
-    * Open Terminal and navigate to the project folder.
-    * Run: `openssl req -x509 -newkey rsa:4096 -keyout key.pem -out cert.pem -sha256 -days 365 -nodes`
+    - Open Terminal and navigate to the project folder.
+    - Run: `openssl req -x509 -newkey rsa:4096 -keyout key.pem -out cert.pem -sha256 -days 365 -nodes`
 
 b.  **Start Secure Server on MacBook:**
     * In the same Terminal window, run:
