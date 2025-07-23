@@ -18,6 +18,32 @@ logger = logging.getLogger("pc")
 pcs = set()
 relay = MediaRelay()
 
+RESPONSE_DIR = os.path.join(ROOT, "audio_clips")
+
+def select_response(text: str) -> str:
+    """
+    Selects a pre-recorded audio file based on keywords in the text.
+    """
+    lower_text = text.lower()
+
+    if any(keyword in lower_text for keyword in ["hello", "hi", "hey"]):
+        return os.path.join(RESPONSE_DIR, "response_greeting.wav")
+    
+    elif any(keyword in lower_text for keyword in ["weather", "forecast"]):
+        return os.path.join(RESPONSE_DIR, "response_weather.wav")
+
+    elif "time" in lower_text:
+        return os.path.join(RESPONSE_DIR, "response_time.wav")
+
+    elif any(keyword in lower_text for keyword in ["joke", "funny"]):
+        return os.path.join(RESPONSE_DIR, "response_joke.wav")
+    
+    elif any(keyword in lower_text for keyword in ["help", "what can you do"]):
+        return os.path.join(RESPONSE_DIR, "response_help.wav")
+    
+    else:
+        # Default fallback response
+        return os.path.join(RESPONSE_DIR, "response_fallback.wav")
 
 class VideoTransformTrack(MediaStreamTrack):
     """
