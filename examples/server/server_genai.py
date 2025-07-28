@@ -10,7 +10,9 @@ import cv2
 from aiohttp import web
 from aiortc import MediaStreamTrack, RTCPeerConnection, RTCSessionDescription
 from aiortc.contrib.media import MediaBlackhole, MediaPlayer, MediaRecorder, MediaRelay
-from av import VideoFrame
+from av import VideoFrame, AudioFrame
+import numpy as np
+import fractions
 
 ROOT = os.path.dirname(__file__)
 
@@ -18,6 +20,69 @@ logger = logging.getLogger("pc")
 pcs = set()
 relay = MediaRelay()
 
+RESPONSE_DIR = os.path.join(ROOT, "audio_clips")
+
+def select_response(text: str) -> str:
+    """
+    Selects a pre-recorded audio file based on keywords in the text.
+    """
+    lower_text = text.lower()
+
+    if any(keyword in lower_text for keyword in ["hello", "hi", "hey"]):
+        return os.path.join(RESPONSE_DIR, "response_greeting.wav")
+    
+    elif any(keyword in lower_text for keyword in ["weather", "forecast"]):
+        return os.path.join(RESPONSE_DIR, "response_weather.wav")
+
+    elif "time" in lower_text:
+        return os.path.join(RESPONSE_DIR, "response_time.wav")
+
+    elif any(keyword in lower_text for keyword in ["joke", "funny"]):
+        return os.path.join(RESPONSE_DIR, "response_joke.wav")
+    
+    elif any(keyword in lower_text for keyword in ["help", "what can you do"]):
+        return os.path.join(RESPONSE_DIR, "response_help.wav")
+    
+    else:
+        # Default fallback response
+        return os.path.join(RESPONSE_DIR, "response_fallback.wav")
+
+class SilenceAudioTrack(MediaStreamTrack):
+    """A dummy audio track which sends silent stereo PCM frames."""
+
+    kind = "audio"
+
+    def __init__(self, channels=2):
+        super().__init__()
+        self.channels = channels
+        self.sample_rate = 48000
+        self.samples_per_frame = 960  # 20 ms at 48 kHz
+        self._pts = 0
+
+    async def recv(self):
+        # 1. Calculate total samples for all channels.
+        total_samples = self.samples_per_frame * self.channels
+
+        # 2. Create a 1D buffer of zeros for the interleaved audio.
+        buf_1d = np.zeros(total_samples, dtype=np.int16)
+
+        # 3. Reshape to (N, 1) and then transpose to (1, N) to match what PyAV expects
+        #    for non-planar stereo. This is the key insight from the online discussions.
+        buf_2d = buf_1d.reshape(-1, 1).T
+
+        # 4. Create the AudioFrame.
+        frame = AudioFrame.from_ndarray(buf_2d, format="s16", layout="stereo")
+        
+        # 5. Set the metadata on the frame.
+        frame.sample_rate = self.sample_rate
+        frame.pts = self._pts
+        
+        # Advance timestamp
+        self._pts += self.samples_per_frame
+
+        # Mimic realtime pacing
+        await asyncio.sleep(self.samples_per_frame / self.sample_rate)
+        return frame
 
 class VideoTransformTrack(MediaStreamTrack):
     """
@@ -90,22 +155,31 @@ class VideoTransformTrack(MediaStreamTrack):
 
 
 async def index(request):
-    content = open(os.path.join(ROOT, "index.html"), "r").read()
+    content = open(os.path.join(ROOT, "index_genai.html"), "r").read()
     return web.Response(content_type="text/html", text=content)
 
 
 async def javascript(request):
-    content = open(os.path.join(ROOT, "client.js"), "r").read()
+    content = open(os.path.join(ROOT, "client_genai.js"), "r").read()
     return web.Response(content_type="application/javascript", text=content)
 
 
 async def offer(request):
+    # parse the signalling parameters FIRST
     params = await request.json()
     offer = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
 
+    # create peer-connection for this call
     pc = RTCPeerConnection()
     pc_id = "PeerConnection(%s)" % uuid.uuid4()
     pcs.add(pc)
+
+    # -------------------------------------------------------------
+    # Reserve an outgoing audio sender with a silent track so the
+    # browser is prepared to receive server audio later.
+    # -------------------------------------------------------------
+    silence_track = SilenceAudioTrack()
+    sender_to_user = pc.addTrack(silence_track)  # keep reference in closure
 
     def log_info(msg, *args):
         logger.info(pc_id + " " + msg, *args)
@@ -113,7 +187,6 @@ async def offer(request):
     log_info("Created for %s", request.remote)
 
     # prepare local media
-    player = MediaPlayer(os.path.join(ROOT, "demo-instruct.wav"))
     if args.record_to:
         recorder = MediaRecorder(args.record_to)
     else:
@@ -138,7 +211,7 @@ async def offer(request):
         log_info("Track %s received", track.kind)
 
         if track.kind == "audio":
-            pc.addTrack(player.audio)
+            # Just record the incoming audio, don't respond immediately.
             recorder.addTrack(track)
         elif track.kind == "video":
             pc.addTrack(
@@ -154,8 +227,27 @@ async def offer(request):
             log_info("Track %s ended", track.kind)
             await recorder.stop()
 
-    # handle offer
+            # Now that the user's track has ended, generate and send a response.
+            if track.kind == "audio":
+                # In a real scenario, you would run ASR on the recorded file.
+                # For now, we'll continue to use a placeholder.
+                user_text = "hello"
+
+                # Select a response based on the text.
+                response_file = select_response(user_text)
+                log_info(f"Selected response for playback: {response_file}")
+
+                # Swap the silent track for the real response.
+                player = MediaPlayer(response_file)
+                sender_to_user.replaceTrack(player.audio)
+                # optional: stop the silence track now
+                silence_track.stop()
+
+
+    # ---- handle offer / start media  ----
     await pc.setRemoteDescription(offer)
+
+    # start recorder after remote description so we know codecs
     await recorder.start()
 
     # send answer
@@ -207,7 +299,7 @@ if __name__ == "__main__":
     app = web.Application()
     app.on_shutdown.append(on_shutdown)
     app.router.add_get("/", index)
-    app.router.add_get("/client.js", javascript)
+    app.router.add_get("/client_genai.js", javascript)
     app.router.add_post("/offer", offer)
     web.run_app(
         app, access_log=None, host=args.host, port=args.port, ssl_context=ssl_context

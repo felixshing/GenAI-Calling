@@ -212,7 +212,6 @@ function start() {
         if (constraints.video) {
             document.getElementById('media').style.display = 'block';
         }
-        //Here is to capture the live audio and video from the device
         navigator.mediaDevices.getUserMedia(constraints).then((stream) => {
             stream.getTracks().forEach((track) => {
                 pc.addTrack(track, stream);
@@ -225,11 +224,25 @@ function start() {
         negotiate();
     }
 
+    document.getElementById('send').style.display = 'inline-block';
     document.getElementById('stop').style.display = 'inline-block';
 }
 
-function stop() {
+function sendAudio() {
+    document.getElementById('send').style.display = 'none';
+
+    // stop local audio
+    pc.getSenders().forEach(function(sender) {
+        if (sender.track.kind === 'audio') {
+            sender.track.stop();
+        }
+    });
+}
+
+function stopCall() {
+    // close everything
     document.getElementById('stop').style.display = 'none';
+    document.getElementById('send').style.display = 'none';
 
     // close data channel
     if (dc) {
@@ -238,7 +251,7 @@ function stop() {
 
     // close transceivers
     if (pc.getTransceivers) {
-        pc.getTransceivers().forEach((transceiver) => {
+        pc.getTransceivers().forEach(function(transceiver) {
             if (transceiver.stop) {
                 transceiver.stop();
             }
@@ -246,12 +259,12 @@ function stop() {
     }
 
     // close local audio / video
-    pc.getSenders().forEach((sender) => {
+    pc.getSenders().forEach(function(sender) {
         sender.track.stop();
     });
 
     // close peer connection
-    setTimeout(() => {
+    setTimeout(function() {
         pc.close();
     }, 500);
 }

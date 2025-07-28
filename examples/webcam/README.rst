@@ -24,6 +24,7 @@ You can then browse to the following page with your browser:
 
 http://127.0.0.1:8080
 
+
 Once you click `Start` the server will send video from its webcam to the
 browser.
 
