@@ -5,19 +5,24 @@ import logging
 import os
 import ssl
 import uuid
+import whisper
+import os
+import asyncio
+from aiortc.contrib.media import MediaRecorder
 
 import cv2
 from aiohttp import web
 from aiortc import MediaStreamTrack, RTCPeerConnection, RTCSessionDescription
 from aiortc.contrib.media import MediaBlackhole, MediaPlayer, MediaRecorder, MediaRelay
 from av import VideoFrame
+RECORDING_DURATION = 5
 
 ROOT = os.path.dirname(__file__)
 
 logger = logging.getLogger("pc")
 pcs = set()
 relay = MediaRelay()
-
+model = whisper.load_model("base")
 
 class VideoTransformTrack(MediaStreamTrack):
     """
@@ -135,24 +140,35 @@ async def offer(request):
 
     @pc.on("track")
     def on_track(track):
-        log_info("Track %s received", track.kind)
+        print(f"Received track: {track.kind}")
 
         if track.kind == "audio":
-            pc.addTrack(player.audio)
-            recorder.addTrack(track)
-        elif track.kind == "video":
-            pc.addTrack(
-                VideoTransformTrack(
-                    relay.subscribe(track), transform=params["video_transform"]
-                )
+            # ---- 1. create a unique WAV path per incoming track ----
+            wav_path = os.path.join(
+                ROOT, f"capture-{uuid.uuid4().hex}.wav"
             )
-            if args.record_to:
-                recorder.addTrack(relay.subscribe(track))
 
-        @track.on("ended")
-        async def on_ended():
-            log_info("Track %s ended", track.kind)
-            await recorder.stop()
+            recorder = MediaRecorder(wav_path)
+            recorder.addTrack(track)
+            asyncio.create_task(recorder.start())
+
+            # ---- 2. stop recorder and run Whisper when the mic track ends ----
+            @track.on("ended")
+            async def on_ended() -> None:
+                print("Microphone track ended – saving and transcribing …")
+
+                await recorder.stop()  # finalise WAV header
+
+                try:
+                    result = model.transcribe(wav_path)
+                    print("Transcription:", result["text"])
+                except Exception as exc:
+                    print("Transcription failed:", exc)
+                finally:
+                    try:
+                        os.remove(wav_path)
+                    except FileNotFoundError:
+                        pass
 
     # handle offer
     await pc.setRemoteDescription(offer)

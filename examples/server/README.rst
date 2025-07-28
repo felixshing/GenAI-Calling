@@ -85,3 +85,9 @@ Note by Ruizhi:
 
       * The page should now load correctly.
       * Click the "Start" button and grant microphone/camera permissions when prompted by the phone.
+
+
+server_single_way is the unidirectional flow built by Ramakrishna and Bhuvana, it calls client.js and index.html. 
+In index.html, I hide the video and data channel buttons, left only the audio button. 
+
+server_genai.py, client_genai.js, index_genai.html are the code built by Ruizhi, which you can ignore at this moment
