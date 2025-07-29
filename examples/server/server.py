@@ -5,6 +5,10 @@ import logging
 import os
 import ssl
 import uuid
+import whisper
+import os
+import asyncio
+from aiortc.contrib.media import MediaRecorder
 
 import cv2
 from aiohttp import web
@@ -17,7 +21,7 @@ ROOT = os.path.dirname(__file__)
 logger = logging.getLogger("pc")
 pcs = set()
 relay = MediaRelay()
-
+model = whisper.load_model("base")
 
 class VideoTransformTrack(MediaStreamTrack):
     """
@@ -135,24 +139,27 @@ async def offer(request):
 
     @pc.on("track")
     def on_track(track):
-        log_info("Track %s received", track.kind)
+        print(f"🔊 Received track: {track.kind}")
 
         if track.kind == "audio":
-            pc.addTrack(player.audio)
+            recorder = MediaRecorder("temp.wav")
             recorder.addTrack(track)
-        elif track.kind == "video":
-            pc.addTrack(
-                VideoTransformTrack(
-                    relay.subscribe(track), transform=params["video_transform"]
-                )
-            )
-            if args.record_to:
-                recorder.addTrack(relay.subscribe(track))
+            asyncio.ensure_future(recorder.start())
 
-        @track.on("ended")
-        async def on_ended():
-            log_info("Track %s ended", track.kind)
-            await recorder.stop()
+            async def stop_and_transcribe():
+                await asyncio.sleep(8)  # record for 8 seconds
+                await recorder.stop()
+                print("📁 Audio chunk saved. Transcribing...")
+
+                try:
+                    result = model.transcribe("temp.wav")
+                    print("📝 Transcription:", result["text"])
+                except Exception as e:
+                    print("❌ Transcription failed:", e)
+
+                os.remove("temp.wav")
+
+            asyncio.ensure_future(stop_and_transcribe())
 
     # handle offer
     await pc.setRemoteDescription(offer)
