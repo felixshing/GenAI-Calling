@@ -5,6 +5,10 @@ import logging
 import os
 import ssl
 import uuid
+import whisper
+import os
+import asyncio
+from aiortc.contrib.media import MediaRecorder
 
 import cv2
 from aiohttp import web
@@ -17,7 +21,12 @@ ROOT = os.path.dirname(__file__)
 logger = logging.getLogger("pc")
 pcs = set()
 relay = MediaRelay()
+model = whisper.load_model("base")
 
+# Store peer connections by session to enable renegotiation
+peer_connections = {}
+# Track which connections have been initialized
+initialized_connections = set()
 
 class VideoTransformTrack(MediaStreamTrack):
     """
@@ -102,15 +111,34 @@ async def javascript(request):
 async def offer(request):
     params = await request.json()
     offer = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
+    session_id = params.get("session_id", "default")
 
-    pc = RTCPeerConnection()
-    pc_id = "PeerConnection(%s)" % uuid.uuid4()
-    pcs.add(pc)
+    # Check if we already have a peer connection for this session
+    if session_id in peer_connections:
+        pc = peer_connections[session_id]
+        pc_id = f"PeerConnection({session_id})[REUSED]"
+        logger.info(f"{pc_id} Reusing existing connection for {request.remote}")
+    else:
+        # Create new peer connection for new session
+        pc = RTCPeerConnection()
+        pc_id = f"PeerConnection({session_id})[NEW]"
+        peer_connections[session_id] = pc
+        pcs.add(pc)
+        logger.info(f"{pc_id} Created new connection for {request.remote}")
+        
+        # Set up cleanup when connection closes
+        @pc.on("connectionstatechange")
+        async def on_connectionstatechange():
+            logger.info(f"{pc_id} Connection state is {pc.connectionState}")
+            if pc.connectionState in ["failed", "closed"]:
+                if session_id in peer_connections:
+                    del peer_connections[session_id]
+                initialized_connections.discard(pc)
+                pcs.discard(pc)
+                logger.info(f"{pc_id} Cleaned up session {session_id}")
 
     def log_info(msg, *args):
         logger.info(pc_id + " " + msg, *args)
-
-    log_info("Created for %s", request.remote)
 
     # prepare local media
     player = MediaPlayer(os.path.join(ROOT, "demo-instruct.wav"))
@@ -119,40 +147,82 @@ async def offer(request):
     else:
         recorder = MediaBlackhole()
 
-    @pc.on("datachannel")
-    def on_datachannel(channel):
-        @channel.on("message")
-        def on_message(message):
-            if isinstance(message, str) and message.startswith("ping"):
-                channel.send("pong" + message[4:])
+    # Only set up event handlers for connections that haven't been initialized
+    if pc not in initialized_connections:
+        initialized_connections.add(pc)
+        log_info("Setting up event handlers for new connection")
+        
+        # Storage for current recorder per connection
+        pc.current_recorder = None
+        pc.current_wav_path = None
 
-    @pc.on("connectionstatechange")
-    async def on_connectionstatechange():
-        log_info("Connection state is %s", pc.connectionState)
-        if pc.connectionState == "failed":
-            await pc.close()
-            pcs.discard(pc)
+        @pc.on("datachannel")
+        def on_datachannel(channel):
+            print(f"Data channel opened on {pc_id}")
+            
+            @channel.on("message")
+            async def on_message(message):
+                print(f"[{pc_id}] Data channel received message: '{message}'")
+                #print(f"[{pc_id}] pc.current_recorder is: {pc.current_recorder}")
+                if message == "transcribe_now" and pc.current_recorder:
+                    print("Received transcribe_now signal - processing immediately")
+                    await pc.current_recorder.stop()
+                    wav_path = pc.current_wav_path
+                    
+                    # Check file size before transcribing
+                    if os.path.getsize(wav_path) < 4096:
+                        print("Empty chunk, skipping transcription")
+                        os.remove(wav_path)
+                        pc.current_recorder = None
+                        return
+                    
+                    try:
+                        result = model.transcribe(wav_path)
+                        print("Transcription (immediate):", result["text"])
+                        
+                        # Delete file immediately after successful transcription
+                        print(f"Deleting audio file: {wav_path}")
+                        os.remove(wav_path)
+                        print(f"Successfully deleted: {wav_path}")
+                        
+                    except Exception as exc:
+                        print("Transcription failed:", exc)
+                        # Still try to delete the file even if transcription failed
+                        try:
+                            print(f"Cleaning up failed transcription file: {wav_path}")
+                            os.remove(wav_path)
+                            print(f"Cleanup successful: {wav_path}")
+                        except Exception as delete_error:
+                            print(f"Cleanup failed for {wav_path}: {delete_error}")
+                    finally:
+                        # Reset recorder state regardless of success/failure
+                        pc.current_recorder = None
+                        pc.current_wav_path = None
+                        print("Reset recorder state")
+                elif isinstance(message, str) and message.startswith("ping"):
+                    channel.send("pong" + message[4:])
 
-    @pc.on("track")
-    def on_track(track):
-        log_info("Track %s received", track.kind)
+        @pc.on("track")
+        def on_track(track):
+            print(f"[{pc_id}] Received track: {track.kind}")
 
-        if track.kind == "audio":
-            pc.addTrack(player.audio)
-            recorder.addTrack(track)
-        elif track.kind == "video":
-            pc.addTrack(
-                VideoTransformTrack(
-                    relay.subscribe(track), transform=params["video_transform"]
+            if track.kind == "audio":
+                # ---- 1. create a unique WAV path per incoming track ----
+                wav_path = os.path.join(
+                    ROOT, f"capture-{uuid.uuid4().hex}.wav"
                 )
-            )
-            if args.record_to:
-                recorder.addTrack(relay.subscribe(track))
 
-        @track.on("ended")
-        async def on_ended():
-            log_info("Track %s ended", track.kind)
-            await recorder.stop()
+                recorder = MediaRecorder(wav_path)
+                recorder.addTrack(track)
+                asyncio.create_task(recorder.start())
+                
+                # Store for immediate access via data-channel
+                pc.current_recorder = recorder
+                pc.current_wav_path = wav_path
+                print(f"[{pc_id}] Set pc.current_recorder to: {recorder}")
+                print(f"[{pc_id}] Set pc.current_wav_path to: {wav_path}")
+    else:
+        log_info("Reusing existing connection, skipping handler setup")
 
     # handle offer
     await pc.setRemoteDescription(offer)

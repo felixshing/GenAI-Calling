@@ -36,7 +36,7 @@
 <body>
 
 <h2>Options</h2>
-<div class="option hidden-option">
+<div class="option">
     <input id="use-datachannel" checked="checked" type="checkbox"/>
     <label for="use-datachannel">Use datachannel</label>
     <select id="datachannel-parameters">
@@ -89,8 +89,23 @@
     <label for="use-stun">Use STUN server</label>
 </div>
 
-<button id="start" onclick="start()">Start</button>
-<button id="stop" style="display: none" onclick="stop()">Send Audio</button>
+<button id="start"  onclick="startCall()">Start Call</button>
+
+<button id="record" style="display:none" onclick="toggleRecord()">
+   Start Recording (1)
+</button>
+
+<button id="stop"   style="display:none" onclick="stopCall()">Stop Call</button>
+
+<div style="margin: 10px 0; padding: 10px; background-color: #f0f0f0; border-radius: 5px;">
+    <strong>Instructions:</strong>
+    <ul>
+        <li>Click "Start Recording" to begin streaming audio to server</li>
+        <li>Speak your message</li>
+        <li>Click "Stop & Transcribe" to end recording and get immediate transcription</li>
+        <li>Repeat for multiple audio chunks</li>
+    </ul>
+</div>
 
 <h2>State</h2>
 <p>

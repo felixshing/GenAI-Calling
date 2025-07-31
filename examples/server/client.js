@@ -10,6 +10,16 @@ var pc = null;
 // data channel
 var dc = null, dcInterval = null;
 
+// Generate a unique session ID for this browser session
+var sessionId = 'session_' + Math.random().toString(36).substr(2, 9);
+console.log('Client session ID:', sessionId);
+
+// Add debugging function
+function debugLog(message) {
+    console.log('[DEBUG]', message);
+    dataChannelLog.textContent += '[DEBUG] ' + message + '\n';
+}
+
 function createPeerConnection() {
     var config = {
         sdpSemantics: 'unified-plan'
@@ -75,6 +85,8 @@ function enumerateInputDevices() {
 }
 
 function negotiate() {
+    debugLog('Starting negotiation...');
+    debugLog('Data channel state before negotiation: ' + (dc ? dc.readyState : 'null'));
     return pc.createOffer().then((offer) => {
         return pc.setLocalDescription(offer);
     }).then(() => {
@@ -111,7 +123,8 @@ function negotiate() {
             body: JSON.stringify({
                 sdp: offer.sdp,
                 type: offer.type,
-                video_transform: document.getElementById('video-transform').value
+                video_transform: document.getElementById('video-transform').value,
+                session_id: sessionId
             }),
             headers: {
                 'Content-Type': 'application/json'
@@ -123,11 +136,16 @@ function negotiate() {
     }).then((answer) => {
         document.getElementById('answer-sdp').textContent = answer.sdp;
         return pc.setRemoteDescription(answer);
+    }).then(() => {
+        debugLog('Negotiation completed successfully');
+        debugLog('Data channel state after negotiation: ' + (dc ? dc.readyState : 'null'));
     }).catch((e) => {
+        debugLog('Negotiation failed: ' + e);
         alert(e);
     });
 }
 
+/*
 function start() {
     document.getElementById('start').style.display = 'none';
 
@@ -227,9 +245,97 @@ function start() {
 
     document.getElementById('stop').style.display = 'inline-block';
 }
+*/
 
-function stop() {
+function startCall() {
+
+
+    document.getElementById('start').style.display = 'none';
+
+    pc = createPeerConnection();
+
+    var time_start = null;
+
+    const current_stamp = () => {
+        if (time_start === null) {
+            time_start = new Date().getTime();
+            return 0;
+        } else {
+            return new Date().getTime() - time_start;
+        }
+    };
+
+    if (document.getElementById('use-datachannel').checked) {
+        var parameters = JSON.parse(document.getElementById('datachannel-parameters').value);
+
+        debugLog('Creating new data channel...');
+        dc = pc.createDataChannel('chat', parameters);
+        debugLog('Data channel created, readyState: ' + dc.readyState);
+        
+        dc.addEventListener('close', () => {
+            debugLog('Data channel CLOSED!');
+            clearInterval(dcInterval);
+            dataChannelLog.textContent += '- close\n';
+        });
+        dc.addEventListener('open', () => {
+            debugLog('Data channel OPENED!');
+            dataChannelLog.textContent += '- open\n';
+            dcInterval = setInterval(() => {
+                var message = 'ping ' + current_stamp();
+                dataChannelLog.textContent += '> ' + message + '\n';
+                if (dc.readyState === 'open') {
+                    dc.send(message);
+                } else {
+                    debugLog('WARNING: Trying to send ping but DC state is: ' + dc.readyState);
+                }
+            }, 1000);
+        });
+        dc.addEventListener('message', (evt) => {
+            dataChannelLog.textContent += '< ' + evt.data + '\n';
+
+            if (evt.data.substring(0, 4) === 'pong') {
+                var elapsed_ms = current_stamp() - parseInt(evt.data.substring(5), 10);
+                dataChannelLog.textContent += ' RTT ' + elapsed_ms + ' ms\n';
+            } else if (evt.data === 'transcription_received') {
+                debugLog('Server confirmed receipt of transcribe_now signal!');
+            }
+        });
+        
+        // Add error event listener
+        dc.addEventListener('error', (event) => {
+            debugLog('Data channel ERROR: ' + event);
+        });
+    }
+
+    negotiate();                           // offer/answer with no media yet
+    document.getElementById('record').style.display = 'inline-block';
+    document.getElementById('stop').style.display   = 'inline-block';
+}
+
+function stopCall() {
+    debugLog('Stopping call - cleaning up UI and connections');
+    
     document.getElementById('stop').style.display = 'none';
+    document.getElementById('record').style.display = 'none'; // Hide record button
+    document.getElementById('start').style.display = 'inline-block'; // Show start button again
+
+    // Reset recording state
+    recording = false;
+    chunkCounter = 1;
+    
+    // Stop any active audio recording
+    if (localAudioTrack) {
+        localAudioTrack.stop();
+        localAudioTrack = null;
+        debugLog('Stopped local audio track');
+    }
+    
+    // Clear ping interval if still running
+    if (dcInterval) {
+        debugLog('Clearing ping/pong interval');
+        clearInterval(dcInterval);
+        dcInterval = null;
+    }
 
     // close data channel
     if (dc) {
@@ -315,6 +421,80 @@ function sdpFilterCodec(kind, codec, realSdp) {
 
 function escapeRegExp(string) {
     return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); // $& means the whole matched string
+}
+
+var localAudioTrack = null;
+var recording = false;
+var sender = null;
+var chunkCounter = 1;
+
+function updateRecordButton() {
+    const label = recording ? `Stop & Transcribe (${chunkCounter})` : `Start Recording (${chunkCounter})`;
+    document.getElementById('record').textContent = label;
+}
+
+function toggleRecord() {
+    console.log('toggleRecord called, recording =', recording);
+    debugLog('toggleRecord called, recording = ' + recording);
+    debugLog('Data channel state at toggle start: ' + (dc ? dc.readyState : 'null'));
+    const btn = document.getElementById('record');
+
+    if (!recording) {                     // ---- start a new chunk ----
+        btn.disabled = true;
+        navigator.mediaDevices.getUserMedia({ audio:true }).then(stream => {
+            localAudioTrack = stream.getAudioTracks()[0];
+            debugLog('Got audio stream, adding track to peer connection...');
+            debugLog('Data channel state before addTrack: ' + (dc ? dc.readyState : 'null'));
+            // Always use addTrack + renegotiate (simplest approach)
+            sender = pc.addTrack(localAudioTrack, stream);
+            debugLog('Track added, starting renegotiation...');
+            return negotiate();
+
+            //For some reaosns, replaceTrack does not work. 
+            // if (sender) {
+            //     sender.replaceTrack(localAudioTrack);
+            //     return Promise.resolve();        // no renegotiation
+            // } 
+        }).then(() => {
+            recording = true;
+            btn.disabled = false;
+            
+            // Stop ping/pong messages once recording starts
+            if (dcInterval) {
+                debugLog('Stopping ping/pong messages - recording started');
+                dataChannelLog.textContent += '[INFO] Ping/pong stopped - recording mode active\n';
+                clearInterval(dcInterval);
+                dcInterval = null;
+            }
+            
+            updateRecordButton();
+        });
+    } else {                 // ---- SEND / stop recording ----
+        if (localAudioTrack) {
+            localAudioTrack.onended = () => console.log('local track ended');
+            localAudioTrack.stop();
+        }
+        
+        // Send immediate transcribe signal via data-channel
+        console.log('About to check data channel. dc =', dc);
+        console.log('dc.readyState =', dc ? dc.readyState : 'dc is null');
+        debugLog('Attempting to send transcribe_now signal...');
+        debugLog('Data channel state: ' + (dc ? dc.readyState : 'null'));
+        if (dc && dc.readyState === 'open') {
+            console.log('Sending transcribe_now signal');
+            debugLog('Sending transcribe_now signal via data channel');
+            dc.send('transcribe_now');
+            console.log('transcribe_now signal sent successfully');
+            debugLog('transcribe_now signal sent successfully');
+        } else {
+            console.log('Data channel not open, readyState:', dc ? dc.readyState : 'dc is null');
+            debugLog('ERROR: Cannot send transcribe_now - data channel not open!');
+        }
+        
+        recording = false;
+        chunkCounter += 1;
+        updateRecordButton();
+    }
 }
 
 enumerateInputDevices();
