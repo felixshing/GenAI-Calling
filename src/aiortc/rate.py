@@ -3,6 +3,10 @@ from enum import Enum
 from typing import Any, Optional
 
 from aiortc.utils import uint32_add, uint32_gt
+from aiortc.reno import Reno
+from aiortc.cubic import CUBIC
+from aiortc.base import Packet
+
 
 BURST_DELTA_THRESHOLD_MS = 5
 
@@ -518,6 +522,7 @@ class RemoteBitrateEstimator:
         self.rate_control = AimdRateControl()
         self.last_update_ms: Optional[int] = None
         self.ssrcs: dict[int, int] = {}
+        self.congestion_control = CUBIC(max_datagram_size=1200)  # or Reno(...)
 
     def add(
         self, arrival_time_ms: int, abs_send_time: int, payload_size: int, ssrc: int
@@ -528,7 +533,9 @@ class RemoteBitrateEstimator:
         # make note of SSRC
         self.ssrcs[ssrc] = arrival_time_ms
 
-        # update incoming bitrate
+        pkt = Packet(sent_time=arrival_time_ms / 1000.0, sent_bytes=payload_size)
+        self.congestion_control.on_packet_sent(pkt)
+# update incoming bitrate
         if self.incoming_bitrate.rate(arrival_time_ms) is not None:
             self.incoming_bitrate_initialized = True
         elif self.incoming_bitrate_initialized:
@@ -567,6 +574,10 @@ class RemoteBitrateEstimator:
                 update_estimate = True
 
         if update_estimate:
+            ack_pkt = Packet(sent_time=arrival_time_ms / 1000.0, sent_bytes=payload_size)
+            self.congestion_control.on_packet_acked(arrival_time_ms / 1000.0, ack_pkt)
+            print("CWND:", self.congestion_control.get_window())
+
             target_bitrate = self.rate_control.update(
                 self.detector.state(),
                 self.incoming_bitrate.rate(arrival_time_ms),

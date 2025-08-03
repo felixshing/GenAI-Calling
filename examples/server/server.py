@@ -16,6 +16,14 @@ from aiortc import MediaStreamTrack, RTCPeerConnection, RTCSessionDescription
 from aiortc.contrib.media import MediaBlackhole, MediaPlayer, MediaRecorder, MediaRelay
 from av import VideoFrame
 
+from aiortc.cubic import CUBIC
+from aiortc.reno import Reno
+from aiortc.base import Packet
+import time
+
+cc = CUBIC(max_datagram_size=1200)
+
+
 ROOT = os.path.dirname(__file__)
 
 logger = logging.getLogger("pc")
@@ -127,6 +135,15 @@ async def offer(request):
     def on_datachannel(channel):
         @channel.on("message")
         def on_message(message):
+
+            print("Received:", message)
+
+            now = time.time()
+            pkt = Packet(sent_time=now, sent_bytes=len(message))
+            cc.on_packet_sent(pkt)
+            cc.on_packet_acked(now + 0.05, pkt)
+            print("CWND:", cc.get_window())
+
             if isinstance(message, str) and message.startswith("ping"):
                 channel.send("pong" + message[4:])
 
