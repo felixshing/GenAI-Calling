@@ -15,7 +15,14 @@ from aiohttp import web
 from aiortc import MediaStreamTrack, RTCPeerConnection, RTCSessionDescription
 from aiortc.contrib.media import MediaBlackhole, MediaPlayer, MediaRecorder, MediaRelay
 from av import VideoFrame
+from av import AudioFrame
+import time
+import fractions
+# numpy not needed for silence generation - using av.AudioFrame directly
 
+#RECORDING_DURATION = 5
+#Useful github issues
+#https://github.com/aiortc/aiortc/issues/571
 ROOT = os.path.dirname(__file__)
 
 logger = logging.getLogger("pc")
@@ -27,6 +34,33 @@ model = whisper.load_model("base")
 peer_connections = {}
 # Track which connections have been initialized
 initialized_connections = set()
+
+RESPONSE_DIR = os.path.join(ROOT, "audio_clips")
+
+def select_response(text: str) -> str:
+    """
+    Selects a pre-recorded audio file based on keywords in the text.
+    """
+    lower_text = text.lower()
+
+    if any(keyword in lower_text for keyword in ["hello", "hi", "hey"]):
+        return os.path.join(RESPONSE_DIR, "response_greeting_stereo.wav")
+    
+    elif any(keyword in lower_text for keyword in ["weather", "forecast"]):
+        return os.path.join(RESPONSE_DIR, "response_weather_stereo.wav")
+
+    elif "time" in lower_text:
+        return os.path.join(RESPONSE_DIR, "response_time_stereo.wav")
+
+    elif any(keyword in lower_text for keyword in ["joke", "funny"]):
+        return os.path.join(RESPONSE_DIR, "response_joke_stereo.wav")
+    
+    elif any(keyword in lower_text for keyword in ["help", "what can you do"]):
+        return os.path.join(RESPONSE_DIR, "response_help_stereo.wav")
+    
+    else:
+        # Default fallback response
+        return os.path.join(RESPONSE_DIR, "response_fallback_stereo.wav")
 
 class VideoTransformTrack(MediaStreamTrack):
     """
@@ -97,6 +131,103 @@ class VideoTransformTrack(MediaStreamTrack):
         else:
             return frame
 
+class ResponseAudioTrack(MediaStreamTrack):
+    """
+    Custom audio track that can dynamically switch between silence and response audio.
+    Based on GitHub issue examples for real-time audio generation.
+    """
+    kind = "audio"
+    
+    def __init__(self):
+        super().__init__()
+        self.sample_rate = 48000
+        self.samples_per_frame = int(self.sample_rate * 0.020)  # 20ms frames
+        self._timestamp = 0
+        self._start_time = None
+        
+        # Audio state
+        self._current_player = None
+        self._is_playing_response = False
+        self._silence_frames_sent = 0
+        
+    async def recv(self):
+        """Generate audio frames - silence by default, response audio when available"""
+        
+        # Handle timing for consistent frame delivery
+        if self._start_time is None:
+            self._start_time = time.time()
+        
+        # Calculate when this frame should be delivered
+        expected_time = self._start_time + (self._timestamp / self.sample_rate)
+        now = time.time()
+        wait_time = expected_time - now
+        
+        if wait_time > 0:
+            await asyncio.sleep(wait_time)
+        
+        # Generate audio frame
+        if self._is_playing_response and self._current_player:
+            try:
+                # Try to get frame from current response player
+                frame = await self._current_player.audio.recv()
+                #print(f"🎵 Playing response frame {self._timestamp}")
+            except Exception as e:
+                #print(f"⚠️ Response playback finished or error: {e}")
+                self._is_playing_response = False
+                self._current_player = None
+                frame = self._generate_silence()
+        else:
+            # Generate silence
+            frame = self._generate_silence()
+            # if self._silence_frames_sent % 50 == 0:  # Log every ~1 second
+            #     print(f"🔇 Silence frame {self._silence_frames_sent}")
+            self._silence_frames_sent += 1
+        
+        # Set timing properties
+        frame.pts = self._timestamp
+        frame.time_base = fractions.Fraction(1, self.sample_rate)
+        self._timestamp += self.samples_per_frame
+        
+        return frame
+    
+    def _generate_silence(self):
+        """Generate a silent audio frame using EXACTLY your working pattern"""
+        import numpy as np
+        
+        # Follow your exact working pattern for PyAudio data:
+        # Create interleaved stereo silence (L,R,L,R,L,R,...)
+        silence_data = np.zeros(self.samples_per_frame * 2, dtype=np.int16)  # *2 for stereo
+        
+        # Use your exact reshape pattern: data.reshape(-1, 1)
+        silence_data = silence_data.reshape(-1, 1)
+        
+        # Use your exact transpose: data.T
+        frame = AudioFrame.from_ndarray(silence_data.T, format='s16', layout='stereo')
+        frame.sample_rate = self.sample_rate
+        frame.pts = self._timestamp
+        frame.time_base = fractions.Fraction(1, self.sample_rate)
+        
+        return frame
+    
+    def play_response(self, audio_file_path):
+        """Switch to playing a response audio file"""
+        try:
+            print(f"🎵 Switching to response: {audio_file_path}")
+            self._current_player = MediaPlayer(audio_file_path)
+            self._is_playing_response = True
+            self._silence_frames_sent = 0
+        except Exception as e:
+            print(f"❌ Failed to load response audio: {e}")
+            self._is_playing_response = False
+            self._current_player = None
+    
+    def stop_response(self):
+        """Switch back to silence"""
+        print("🔇 Switching back to silence")
+        self._is_playing_response = False
+        if self._current_player:
+            self._current_player = None
+
 
 async def index(request):
     content = open(os.path.join(ROOT, "index.html"), "r").read()
@@ -118,13 +249,31 @@ async def offer(request):
         pc = peer_connections[session_id]
         pc_id = f"PeerConnection({session_id})[REUSED]"
         logger.info(f"{pc_id} Reusing existing connection for {request.remote}")
+        
+        # For reused connections, just handle the SDP negotiation
+        await pc.setRemoteDescription(offer)
+        answer = await pc.createAnswer()
+        await pc.setLocalDescription(answer)
+        
+        return web.Response(
+            content_type="application/json",
+            text=json.dumps(
+                {"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}
+            ),
+        )
     else:
         # Create new peer connection for new session
         pc = RTCPeerConnection()
         pc_id = f"PeerConnection({session_id})[NEW]"
         peer_connections[session_id] = pc
         pcs.add(pc)
+        pc.session_id = session_id
         logger.info(f"{pc_id} Created new connection for {request.remote}")
+        
+        # Create and add our custom response audio track FIRST (starts with silence)
+        pc.response_track = ResponseAudioTrack()
+        pc.addTrack(pc.response_track)
+        logger.info(f"{pc_id} Added custom response audio track (starts with silence)")
         
         # Set up cleanup when connection closes
         @pc.on("connectionstatechange")
@@ -137,20 +286,8 @@ async def offer(request):
                 pcs.discard(pc)
                 logger.info(f"{pc_id} Cleaned up session {session_id}")
 
-    def log_info(msg, *args):
-        logger.info(pc_id + " " + msg, *args)
-
-    # prepare local media
-    player = MediaPlayer(os.path.join(ROOT, "demo-instruct.wav"))
-    if args.record_to:
-        recorder = MediaRecorder(args.record_to)
-    else:
-        recorder = MediaBlackhole()
-
-    # Only set up event handlers for connections that haven't been initialized
-    if pc not in initialized_connections:
+        # Set up event handlers for new connection
         initialized_connections.add(pc)
-        log_info("Setting up event handlers for new connection")
         
         # Storage for current recorder per connection
         pc.current_recorder = None
@@ -163,7 +300,6 @@ async def offer(request):
             @channel.on("message")
             async def on_message(message):
                 print(f"[{pc_id}] Data channel received message: '{message}'")
-                #print(f"[{pc_id}] pc.current_recorder is: {pc.current_recorder}")
                 if message == "transcribe_now" and pc.current_recorder:
                     print("Received transcribe_now signal - processing immediately")
                     await pc.current_recorder.stop()
@@ -178,7 +314,21 @@ async def offer(request):
                     
                     try:
                         result = model.transcribe(wav_path)
-                        print("Transcription (immediate):", result["text"])
+                        transcribed_text = result["text"]
+                        print("Transcription (immediate):", transcribed_text)
+                        #transcribed_text='hello' #just for testing
+                        
+                        # Select and play response using our custom track
+                        response_file = select_response(transcribed_text)
+                        print(f"Selected response file: {response_file}")
+                        
+                        # Use our custom track to play the response
+                        if hasattr(pc, 'response_track'):
+                            print(f"🎵 Triggering response playback: {response_file}")
+                            pc.response_track.play_response(response_file)
+                            print("📊 Watch WebRTC-internals inbound-rtp bytesReceived for audio!")
+                        else:
+                            print("❌ No response track available")
                         
                         # Delete file immediately after successful transcription
                         print(f"Deleting audio file: {wav_path}")
@@ -207,7 +357,9 @@ async def offer(request):
             print(f"[{pc_id}] Received track: {track.kind}")
 
             if track.kind == "audio":
-                # ---- 1. create a unique WAV path per incoming track ----
+                print(f"[{pc_id}] Setting up recording for client audio track")
+                
+                # Create a unique WAV path for this track
                 wav_path = os.path.join(
                     ROOT, f"capture-{uuid.uuid4().hex}.wav"
                 )
@@ -221,12 +373,9 @@ async def offer(request):
                 pc.current_wav_path = wav_path
                 print(f"[{pc_id}] Set pc.current_recorder to: {recorder}")
                 print(f"[{pc_id}] Set pc.current_wav_path to: {wav_path}")
-    else:
-        log_info("Reusing existing connection, skipping handler setup")
 
-    # handle offer
+    # handle offer - this works for both new and reused connections
     await pc.setRemoteDescription(offer)
-    await recorder.start()
 
     # send answer
     answer = await pc.createAnswer()

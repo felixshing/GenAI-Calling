@@ -31,6 +31,10 @@ function createPeerConnection() {
 
     pc = new RTCPeerConnection(config);
 
+    // Add bidirectional audio transceiver for both sending speech and receiving responses
+    // sendrecv = client can both send TO server and receive FROM server
+    pc.addTransceiver('audio', { direction: 'sendrecv' });
+
     // register some listeners to help debugging
     pc.addEventListener('icegatheringstatechange', () => {
         iceGatheringLog.textContent += ' -> ' + pc.iceGatheringState;
@@ -49,10 +53,48 @@ function createPeerConnection() {
 
     // connect audio / video
     pc.addEventListener('track', (evt) => {
-        if (evt.track.kind == 'video')
+        if (evt.track.kind == 'video') {
             document.getElementById('video').srcObject = evt.streams[0];
-        else
-            document.getElementById('audio').srcObject = evt.streams[0];
+        } else {
+            const audioElement = document.getElementById('audio');
+            const statusElement = document.getElementById('audio-status');
+            
+            console.log('🎵 Received audio track from server');
+            statusElement.innerHTML = '🎵 Audio track received from server';
+            
+            audioElement.srcObject = evt.streams[0];
+            
+            // Add event listeners for audio debugging
+            audioElement.addEventListener('loadstart', () => {
+                console.log('🎵 Audio loading started');
+                statusElement.innerHTML += '<br>📡 Audio loading started';
+            });
+            
+            audioElement.addEventListener('canplay', () => {
+                console.log('🎵 Audio can start playing');
+                statusElement.innerHTML += '<br>✅ Audio ready to play';
+            });
+            
+            audioElement.addEventListener('play', () => {
+                console.log('🎵 Audio started playing');
+                statusElement.innerHTML += '<br>🔊 Audio PLAYING!';
+            });
+            
+            audioElement.addEventListener('pause', () => {
+                console.log('🎵 Audio paused');
+                statusElement.innerHTML += '<br>⏸️ Audio paused';
+            });
+            
+            // Try to play audio (handle autoplay restrictions)
+            audioElement.play().then(() => {
+                console.log('🎵 Audio play() succeeded');
+                statusElement.innerHTML += '<br> Autoplay succeeded';
+            }).catch((error) => {
+                console.log('🎵 Audio play() failed:', error);
+                statusElement.innerHTML += '<br> Autoplay blocked - ' + error.message;
+                statusElement.innerHTML += '<br> Click audio controls to play manually';
+            });
+        }
     });
 
     return pc;
