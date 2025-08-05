@@ -8,12 +8,12 @@ import uuid
 import whisper
 import os
 import asyncio
-from aiortc.contrib.media import MediaRecorder
+from third_party.aiortc.contrib.media import MediaRecorder
 
 import cv2
 from aiohttp import web
-from aiortc import MediaStreamTrack, RTCPeerConnection, RTCSessionDescription
-from aiortc.contrib.media import MediaBlackhole, MediaPlayer, MediaRecorder, MediaRelay
+from third_party.aiortc import MediaStreamTrack, RTCPeerConnection, RTCSessionDescription
+from third_party.aiortc.contrib.media import MediaBlackhole, MediaPlayer, MediaRecorder, MediaRelay
 from av import VideoFrame
 from av import AudioFrame
 import time
@@ -35,7 +35,7 @@ peer_connections = {}
 # Track which connections have been initialized
 initialized_connections = set()
 
-RESPONSE_DIR = os.path.join(ROOT, "audio_clips")
+RESPONSE_DIR = os.path.join(ROOT, "media", "audio_clips")
 
 def select_response(text: str) -> str:
     """
@@ -230,12 +230,12 @@ class ResponseAudioTrack(MediaStreamTrack):
 
 
 async def index(request):
-    content = open(os.path.join(ROOT, "index.html"), "r").read()
+    content = open(os.path.join(ROOT, "web", "index.html"), "r").read()
     return web.Response(content_type="text/html", text=content)
 
 
 async def javascript(request):
-    content = open(os.path.join(ROOT, "client.js"), "r").read()
+    content = open(os.path.join(ROOT, "web", "client.js"), "r").read()
     return web.Response(content_type="application/javascript", text=content)
 
 
