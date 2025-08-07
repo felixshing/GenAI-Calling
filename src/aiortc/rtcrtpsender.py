@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import random
 import time
 import traceback
@@ -21,6 +22,7 @@ from .rtcrtpparameters import (
     RTCRtpCodecParameters,
     RTCRtpSendParameters,
 )
+from .cc import create_controller
 from .rtp import (
     RTCP_PSFB_APP,
     RTCP_PSFB_PLI,
@@ -117,6 +119,10 @@ class RTCRtpSender:
         self.__started = False
         self.__stats = RTCStatsReport()
         self.__transport = transport
+        
+        # Initialize congestion control for sender-side loss feedback
+        cc_algorithm = os.getenv("AIORTC_CC", "remb")
+        self.__cc_controller = create_controller(cc_algorithm)
 
         # stats
         self.__lsr: Optional[int] = None
@@ -270,6 +276,14 @@ class RTCRtpSender:
                         fractionLost=report.fraction_lost,
                     )
                 )
+                
+                # Feed loss information to congestion control
+                self.__cc_controller.on_receiver_report(report.fraction_lost)
+                
+                # Update encoder bitrate based on CC decision
+                target_bitrate = self.__cc_controller.target_bitrate()
+                if target_bitrate and self.__encoder and hasattr(self.__encoder, "target_bitrate"):
+                    self.__encoder.target_bitrate = target_bitrate
         elif isinstance(packet, RtcpRtpfbPacket) and packet.fmt == RTCP_RTPFB_NACK:
             for seq in packet.lost:
                 await self._retransmit(seq)

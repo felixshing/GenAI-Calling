@@ -8,12 +8,12 @@ import uuid
 import whisper
 import os
 import asyncio
-from third_party.aiortc.contrib.media import MediaRecorder
+from aiortc.contrib.media import MediaRecorder
 
 import cv2
 from aiohttp import web
-from third_party.aiortc import MediaStreamTrack, RTCPeerConnection, RTCSessionDescription
-from third_party.aiortc.contrib.media import MediaBlackhole, MediaPlayer, MediaRecorder, MediaRelay
+from aiortc import MediaStreamTrack, RTCPeerConnection, RTCSessionDescription
+from aiortc.contrib.media import MediaBlackhole, MediaPlayer, MediaRecorder, MediaRelay
 from av import VideoFrame
 from av import AudioFrame
 import time
@@ -35,7 +35,7 @@ peer_connections = {}
 # Track which connections have been initialized
 initialized_connections = set()
 
-RESPONSE_DIR = os.path.join(ROOT, "media", "audio_clips")
+RESPONSE_DIR = os.path.join(ROOT, "audio_clips")
 
 def select_response(text: str) -> str:
     """
@@ -409,6 +409,12 @@ if __name__ == "__main__":
         "--port", type=int, default=8080, help="Port for HTTP server (default: 8080)"
     )
     parser.add_argument("--record-to", help="Write received media to a file.")
+    parser.add_argument(
+        "--cc", 
+        default="remb", 
+        choices=["remb", "gcc-v0"],
+        help="Congestion control algorithm (default: remb)"
+    )
     parser.add_argument("--verbose", "-v", action="count")
     args = parser.parse_args()
 
@@ -416,6 +422,10 @@ if __name__ == "__main__":
         logging.basicConfig(level=logging.DEBUG)
     else:
         logging.basicConfig(level=logging.INFO)
+    
+    # Set congestion control algorithm via environment variable
+    os.environ["AIORTC_CC"] = args.cc
+    print(f"Using congestion control algorithm: {args.cc}")
 
     if args.cert_file:
         ssl_context = ssl.SSLContext()

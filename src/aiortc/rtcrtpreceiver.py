@@ -1,6 +1,7 @@
 import asyncio
 import datetime
 import logging
+import os
 import queue
 import random
 import threading
@@ -17,6 +18,7 @@ from .exceptions import InvalidStateError
 from .jitterbuffer import JitterBuffer
 from .mediastreams import MediaStreamError, MediaStreamTrack
 from .rate import RemoteBitrateEstimator
+from .cc import create_controller
 from .rtcdtlstransport import RTCDtlsTransport
 from .rtcrtpparameters import (
     RTCRtpCapabilities,
@@ -274,12 +276,14 @@ class RTCRtpReceiver:
         self.__kind = kind
         if kind == "audio":
             self.__jitter_buffer = JitterBuffer(capacity=16, prefetch=4)
-            self.__nack_generator = None
+            self.__nack_generator = None #for audio, WebRTC does not enable nack and congestion control 
             self.__remote_bitrate_estimator = None
         else:
             self.__jitter_buffer = JitterBuffer(capacity=128, is_video=True)
             self.__nack_generator = NackGenerator()
-            self.__remote_bitrate_estimator = RemoteBitrateEstimator()
+            # Use configurable congestion control algorithm
+            cc_algorithm = os.getenv("AIORTC_CC", "remb")
+            self.__cc_controller = create_controller(cc_algorithm)
         self._track: Optional[RemoteStreamTrack] = None
         self.__rtcp_exited = asyncio.Event()
         self.__rtcp_started = asyncio.Event()
@@ -458,24 +462,23 @@ class RTCRtpReceiver:
         if not self._enabled:
             return
 
-        # feed bitrate estimator
-        if self.__remote_bitrate_estimator is not None:
-            if packet.extensions.abs_send_time is not None:
-                remb = self.__remote_bitrate_estimator.add(
-                    abs_send_time=packet.extensions.abs_send_time,
-                    arrival_time_ms=arrival_time_ms,
-                    payload_size=len(packet.payload) + packet.padding_size,
-                    ssrc=packet.ssrc,
+        # feed congestion control algorithm  
+        if hasattr(self, '__cc_controller') and packet.extensions.abs_send_time is not None:
+            remb = self.__cc_controller.on_packet_received(
+                abs_send_time=packet.extensions.abs_send_time,
+                arrival_time_ms=arrival_time_ms,
+                payload_size=len(packet.payload) + packet.padding_size,
+                ssrc=packet.ssrc,
+            )
+            if self.__rtcp_ssrc is not None and remb is not None:
+                # send Receiver Estimated Maximum Bitrate feedback
+                rtcp_packet = RtcpPsfbPacket(
+                    fmt=RTCP_PSFB_APP,
+                    ssrc=self.__rtcp_ssrc,
+                    media_ssrc=0,
+                    fci=pack_remb_fci(*remb),
                 )
-                if self.__rtcp_ssrc is not None and remb is not None:
-                    # send Receiver Estimated Maximum Bitrate feedback
-                    rtcp_packet = RtcpPsfbPacket(
-                        fmt=RTCP_PSFB_APP,
-                        ssrc=self.__rtcp_ssrc,
-                        media_ssrc=0,
-                        fci=pack_remb_fci(*remb),
-                    )
-                    await self._send_rtcp(rtcp_packet)
+                await self._send_rtcp(rtcp_packet)
 
         # keep track of sources
         self.__active_ssrc[packet.ssrc] = clock.current_datetime()
