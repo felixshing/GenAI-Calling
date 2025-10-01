@@ -212,7 +212,6 @@ function start() {
         if (constraints.video) {
             document.getElementById('media').style.display = 'block';
         }
-        //Here is to capture the live audio and video from the device
         navigator.mediaDevices.getUserMedia(constraints).then((stream) => {
             stream.getTracks().forEach((track) => {
                 pc.addTrack(track, stream);

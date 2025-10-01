@@ -17,9 +17,13 @@ from .base import Decoder, Encoder
 
 logger = logging.getLogger(__name__)
 
+# Global counter for decode failures (for quality metrics)
+_decode_failure_count = 0
+_total_decode_attempts = 0
+
 DEFAULT_BITRATE = 1000000  # 1 Mbps
 MIN_BITRATE = 500000  # 500 kbps
-MAX_BITRATE = 3000000  # 3 Mbps
+MAX_BITRATE = 5000000  # 5 Mbps
 
 MAX_FRAME_RATE = 30
 PACKET_MAX = 1300
@@ -109,14 +113,20 @@ class H264Decoder(Decoder):
         self.codec = av.CodecContext.create("h264", "r")
 
     def decode(self, encoded_frame: JitterFrame) -> list[Frame]:
+        global _decode_failure_count, _total_decode_attempts
+        _total_decode_attempts += 1
+        
         try:
             packet = av.Packet(encoded_frame.data)
             packet.pts = encoded_frame.timestamp
             packet.time_base = VIDEO_TIME_BASE
             return cast(list[Frame], self.codec.decode(packet))
         except av.FFmpegError as e:
+            _decode_failure_count += 1
+            failure_rate = (_decode_failure_count / _total_decode_attempts) * 100
+            
             logger.warning(
-                "H264Decoder() failed to decode, skipping package: " + str(e)
+                f"H264Decoder() failed to decode, skipping package ({failure_rate:.1f}% failure rate): " + str(e)
             )
             return []
 
