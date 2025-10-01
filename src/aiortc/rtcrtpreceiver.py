@@ -284,6 +284,7 @@ class RTCRtpReceiver:
             # Use configurable congestion control algorithm
             cc_algorithm = os.getenv("AIORTC_CC", "remb")
             self.__cc_controller = create_controller(cc_algorithm)
+            print(f"[RECEIVER] Created CC controller: {cc_algorithm} -> {type(self.__cc_controller).__name__}")
         self._track: Optional[RemoteStreamTrack] = None
         self.__rtcp_exited = asyncio.Event()
         self.__rtcp_started = asyncio.Event()
@@ -463,13 +464,31 @@ class RTCRtpReceiver:
             return
 
         # feed congestion control algorithm  
-        if hasattr(self, '__cc_controller') and packet.extensions.abs_send_time is not None:
+        if hasattr(self, '__cc_controller'):
+            # Always try to process packets, even without abs_send_time for debugging
+            abs_send_time_val = packet.extensions.abs_send_time
+            if abs_send_time_val is None:
+                # Debug: check if abs-send-time extension is missing
+                try:
+                    import os
+                    if os.getenv("DEBUG_CC", "0") == "1":
+                        print(f"[DEBUG] No abs_send_time extension for SSRC {packet.ssrc}, kind={self.__kind}")
+                except Exception:
+                    pass
+                # Use timestamp as fallback for debugging
+                abs_send_time_val = packet.timestamp & 0xFFFFFF
+            
             remb = self.__cc_controller.on_packet_received(
-                abs_send_time=packet.extensions.abs_send_time,
+                abs_send_time=abs_send_time_val,
                 arrival_time_ms=arrival_time_ms,
                 payload_size=len(packet.payload) + packet.padding_size,
                 ssrc=packet.ssrc,
             )
+            
+            # Debug: Always log what we get from CC
+            if remb is not None:
+                print(f"[RECEIVER] CC produced REMB: {remb}")
+            
             if self.__rtcp_ssrc is not None and remb is not None:
                 # send Receiver Estimated Maximum Bitrate feedback
                 rtcp_packet = RtcpPsfbPacket(
@@ -479,6 +498,17 @@ class RTCRtpReceiver:
                     fci=pack_remb_fci(*remb),
                 )
                 await self._send_rtcp(rtcp_packet)
+                # optional logging of REMB/Ar for experiments
+                try:
+                    import os, time as _time
+                    loss_log_path = os.getenv("RTCP_LOSS_LOG")
+                    log_est = os.getenv("EVAL_LOG_ESTIMATES", "0")
+                    if loss_log_path and log_est not in ("", "0", "false", "False"):
+                        target_bps, ssrcs = remb
+                        with open(loss_log_path, "a", encoding="utf-8") as f:
+                            f.write(f"REMB Ar={target_bps}, ssrcs={ssrcs}, time={_time.time():.3f}\n")
+                except Exception:
+                    pass
 
         # keep track of sources
         self.__active_ssrc[packet.ssrc] = clock.current_datetime()
@@ -577,6 +607,20 @@ class RTCRtpReceiver:
                     )
 
                 if self.__rtcp_ssrc is not None and reports:
+                    # optional logging of loss from RR
+                    try:
+                        import os, time as _time
+                        loss_log_path = os.getenv("RTCP_LOSS_LOG")
+                        if loss_log_path:
+                            for ri in reports:
+                                loss_pct = (ri.fraction_lost / 255.0) * 100.0
+                                with open(loss_log_path, "a", encoding="utf-8") as f:
+                                    f.write(
+                                        f"RR ssrc={ri.ssrc} loss={ri.fraction_lost}/255 ({loss_pct:.1f}%), time={_time.time():.3f}\n"
+                                    )
+                    except Exception:
+                        pass
+
                     packet = RtcpRrPacket(ssrc=self.__rtcp_ssrc, reports=reports)
                     await self._send_rtcp(packet)
 
@@ -588,6 +632,9 @@ class RTCRtpReceiver:
 
     async def _send_rtcp(self, packet: AnyRtcpPacket) -> None:
         self.__log_debug("> %s", packet)
+        
+
+        
         try:
             await self.transport._send_rtp(bytes(packet))
         except ConnectionError:

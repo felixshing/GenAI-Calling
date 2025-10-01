@@ -135,7 +135,9 @@ class AimdRateControl:
             self._update_max_throughput_estimate(estimated_throughput_kbps)
 
             self.near_max = True
-            new_bitrate = round(0.85 * estimated_throughput)
+            # FIXED: Properly reduce bitrate on loss instead of setting equal to throughput
+            # Use multiplicative decrease: reduce by 15% on loss
+            new_bitrate = round(0.85 * self.current_bitrate)
             self.last_change_ms = now_ms
             self.state = RateControlState.HOLD
 
@@ -518,6 +520,8 @@ class RemoteBitrateEstimator:
         self.rate_control = AimdRateControl()
         self.last_update_ms: Optional[int] = None
         self.ssrcs: dict[int, int] = {}
+        self._target_bitrate: Optional[int] = None  # Target bitrate constraint
+
 
     def add(
         self, arrival_time_ms: int, abs_send_time: int, payload_size: int, ssrc: int
@@ -573,7 +577,17 @@ class RemoteBitrateEstimator:
                 arrival_time_ms,
             )
             if target_bitrate is not None:
+                # Apply target bitrate constraint if set
+                if self._target_bitrate is not None:
+                    target_bitrate = min(target_bitrate, self._target_bitrate)
+                
                 self.last_update_ms = arrival_time_ms
                 return target_bitrate, list(self.ssrcs.keys())
 
         return None
+    
+    def set_target_bitrate(self, target_bitrate: int) -> None:
+        """Set target bitrate constraint for Ar component."""
+        self._target_bitrate = target_bitrate
+    
+

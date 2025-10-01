@@ -1,0 +1,273 @@
+import argparse
+import asyncio
+import json
+import logging
+import os
+import ssl
+import uuid
+from collections import defaultdict
+
+import cv2
+from aiohttp import web
+from aiortc import MediaStreamTrack, RTCPeerConnection, RTCSessionDescription
+from aiortc.contrib.media import MediaBlackhole, MediaPlayer, MediaRecorder, MediaRelay
+from aiortc.sdp import candidate_from_sdp
+from av import VideoFrame
+
+ROOT = os.path.dirname(__file__)
+
+logger = logging.getLogger("pc")
+pcs = set()
+relay = MediaRelay()
+
+# Store peer connections by session ID for Trickle ICE
+peer_connections = {}
+# Track pending candidates for each session
+pending_candidates = defaultdict(list)
+
+
+class VideoTransformTrack(MediaStreamTrack):
+    """
+    A video stream track that transforms frames from an another track.
+    """
+
+    kind = "video"
+
+    def __init__(self, track, transform):
+        super().__init__()  # don't forget this!
+        self.track = track
+        self.transform = transform
+
+    async def recv(self):
+        frame = await self.track.recv()
+
+        if self.transform == "cartoon":
+            img = frame.to_ndarray(format="bgr24")
+
+            # prepare color
+            img_color = cv2.pyrDown(cv2.pyrDown(img))
+            for _ in range(6):
+                img_color = cv2.bilateralFilter(img_color, 9, 9, 7)
+            img_color = cv2.pyrUp(cv2.pyrUp(img_color))
+
+            # prepare edges
+            img_edges = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+            img_edges = cv2.adaptiveThreshold(
+                cv2.medianBlur(img_edges, 7),
+                255,
+                cv2.ADAPTIVE_THRESH_MEAN_C,
+                cv2.THRESH_BINARY,
+                9,
+                2,
+            )
+            img_edges = cv2.cvtColor(img_edges, cv2.COLOR_GRAY2RGB)
+
+            # combine color and edges
+            img = cv2.bitwise_and(img_color, img_edges)
+
+            # rebuild a VideoFrame, preserving timing information
+            new_frame = VideoFrame.from_ndarray(img, format="bgr24")
+            new_frame.pts = frame.pts
+            new_frame.time_base = frame.time_base
+            return new_frame
+        elif self.transform == "edges":
+            # perform edge detection
+            img = frame.to_ndarray(format="bgr24")
+            img = cv2.cvtColor(cv2.Canny(img, 100, 200), cv2.COLOR_GRAY2BGR)
+
+            # rebuild a VideoFrame, preserving timing information
+            new_frame = VideoFrame.from_ndarray(img, format="bgr24")
+            new_frame.pts = frame.pts
+            new_frame.time_base = frame.time_base
+            return new_frame
+        elif self.transform == "rotate":
+            # rotate image
+            img = frame.to_ndarray(format="bgr24")
+            rows, cols, _ = img.shape
+            M = cv2.getRotationMatrix2D((cols / 2, rows / 2), frame.time * 45, 1)
+            img = cv2.warpAffine(img, M, (cols, rows))
+
+            # rebuild a VideoFrame, preserving timing information
+            new_frame = VideoFrame.from_ndarray(img, format="bgr24")
+            new_frame.pts = frame.pts
+            new_frame.time_base = frame.time_base
+            return new_frame
+        else:
+            return frame
+
+
+async def index(request):
+    content = open(os.path.join(ROOT, "index.html"), "r").read()
+    return web.Response(content_type="text/html", text=content)
+
+
+async def javascript(request):
+    content = open(os.path.join(ROOT, "client_trickleICE.js"), "r").read()
+    return web.Response(content_type="application/javascript", text=content)
+
+
+async def offer(request):
+    params = await request.json()
+    offer = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
+    session_id = params.get("session_id", "default")
+
+    # Check if we already have a peer connection for this session
+    if session_id in peer_connections:
+        pc = peer_connections[session_id]
+        pc_id = f"PeerConnection({session_id})[REUSED]"
+        logger.info(f"{pc_id} Reusing existing connection for {request.remote}")
+        
+        # For reused connections, just handle the SDP negotiation
+        await pc.setRemoteDescription(offer)
+        answer = await pc.createAnswer()
+        await pc.setLocalDescription(answer)
+        
+        return web.Response(
+            content_type="application/json",
+            text=json.dumps(
+                {"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}
+            ),
+        )
+    else:
+        # Create new peer connection for new session
+        pc = RTCPeerConnection()
+        pc_id = f"PeerConnection({session_id})[NEW]"
+        peer_connections[session_id] = pc
+        pcs.add(pc)
+        pc.session_id = session_id
+        logger.info(f"{pc_id} Created new connection for {request.remote}")
+
+    def log_info(msg, *args):
+        logger.info(f"{pc_id} {msg}", *args)
+
+    # prepare local media
+    player = MediaPlayer(os.path.join(ROOT, "demo-instruct.wav"))
+    if args.record_to:
+        recorder = MediaRecorder(args.record_to)
+    else:
+        recorder = MediaBlackhole()
+
+    @pc.on("datachannel")
+    def on_datachannel(channel):
+        @channel.on("message")
+        def on_message(message):
+            if isinstance(message, str) and message.startswith("ping"):
+                channel.send("pong" + message[4:])
+
+    @pc.on("connectionstatechange")
+    async def on_connectionstatechange():
+        log_info("Connection state is %s", pc.connectionState)
+        if pc.connectionState in ["failed", "closed"]:
+            if session_id in peer_connections:
+                del peer_connections[session_id]
+            if session_id in pending_candidates:
+                del pending_candidates[session_id]
+            pcs.discard(pc)
+
+    @pc.on("track")
+    def on_track(track):
+        log_info("Track %s received", track.kind)
+
+        if track.kind == "audio":
+            pc.addTrack(player.audio)
+            recorder.addTrack(track)
+        elif track.kind == "video":
+            pc.addTrack(
+                VideoTransformTrack(
+                    relay.subscribe(track), transform=params["video_transform"]
+                )
+            )
+            if args.record_to:
+                recorder.addTrack(relay.subscribe(track))
+
+        @track.on("ended")
+        async def on_ended():
+            log_info("Track %s ended", track.kind)
+            await recorder.stop()
+
+    # handle offer
+    await pc.setRemoteDescription(offer)
+    await recorder.start()
+
+    # send answer
+    answer = await pc.createAnswer()
+    await pc.setLocalDescription(answer)
+
+    return web.Response(
+        content_type="application/json",
+        text=json.dumps(
+            {"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}
+        ),
+    )
+
+
+async def add_candidate(request):
+    """Handle Trickle ICE candidate addition"""
+    params = await request.json()
+    session_id = params.get("session_id", "default")
+    candidate_data = params.get("candidate")
+    
+    if session_id not in peer_connections:
+        return web.Response(status=404, text="Session not found")
+    
+    pc = peer_connections[session_id]
+    
+    try:
+        candidate = candidate_from_sdp(candidate_data["candidate"])
+        candidate.sdpMid = candidate_data.get("sdpMid")
+        candidate.sdpMLineIndex = candidate_data.get("sdpMLineIndex")
+        
+        await pc.addIceCandidate(candidate)
+        logger.info(f"Added ICE candidate for session {session_id}")
+        
+        return web.Response()
+    except Exception as e:
+        logger.error(f"Failed to add ICE candidate: {e}")
+        return web.Response(status=500, text=str(e))
+
+
+async def on_shutdown(app):
+    # close peer connections
+    coros = [pc.close() for pc in pcs]
+    await asyncio.gather(*coros)
+    pcs.clear()
+    peer_connections.clear()
+    pending_candidates.clear()
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="WebRTC audio / video / data-channels demo"
+    )
+    parser.add_argument("--cert-file", help="SSL certificate file (for HTTPS)")
+    parser.add_argument("--key-file", help="SSL key file (for HTTPS)")
+    parser.add_argument(
+        "--host", default="0.0.0.0", help="Host for HTTP server (default: 0.0.0.0)"
+    )
+    parser.add_argument(
+        "--port", type=int, default=8080, help="Port for HTTP server (default: 8080)"
+    )
+    parser.add_argument("--record-to", help="Write received media to a file.")
+    parser.add_argument("--verbose", "-v", action="count")
+    args = parser.parse_args()
+
+    if args.verbose:
+        logging.basicConfig(level=logging.DEBUG)
+    else:
+        logging.basicConfig(level=logging.INFO)
+
+    if args.cert_file:
+        ssl_context = ssl.SSLContext()
+        ssl_context.load_cert_chain(args.cert_file, args.key_file)
+    else:
+        ssl_context = None
+
+    app = web.Application()
+    app.on_shutdown.append(on_shutdown)
+    app.router.add_get("/", index)
+    app.router.add_get("/client_trickleICE.js", javascript)
+    app.router.add_post("/offer", offer)
+    app.router.add_post("/add_candidate", add_candidate)
+    web.run_app(
+        app, access_log=None, host=args.host, port=args.port, ssl_context=ssl_context
+    )

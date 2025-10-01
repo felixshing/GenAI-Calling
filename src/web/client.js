@@ -72,7 +72,7 @@ function createPeerConnection() {
             
             audioElement.addEventListener('canplay', () => {
                 console.log('🎵 Audio can start playing');
-                statusElement.innerHTML += '<br>✅ Audio ready to play';
+                statusElement.innerHTML += '<br>Audio ready to play';
             });
             
             audioElement.addEventListener('play', () => {

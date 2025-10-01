@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_BITRATE = 500000  # 500 kbps
 MIN_BITRATE = 250000  # 250 kbps
-MAX_BITRATE = 1500000  # 1.5 Mbps
+MAX_BITRATE = 10000000  # 10 Mbps (increased for experiments) was 1.5Mbps
 
 MAX_FRAME_RATE = 30
 PACKET_MAX = 1300
@@ -220,17 +220,20 @@ class Vp8Encoder(Encoder):
                 # We want rc_buf_sz = 1000 and FFmpeg sets:
                 #   rc_buf_sz =  bufsize * 1000 / bit_rate
                 "bufsize": str(self.__target_bitrate),
-                "cpu-used": "-6",
+                "cpu-used": "-4",  # Less CPU optimization = higher quality (was -6, range -16 to 16)
                 "deadline": "realtime",
                 "lag-in-frames": "0",
                 # Setting minrate = maxrate = bit_rate triggers CBR.
                 "minrate": str(self.target_bitrate),
                 "maxrate": str(self.target_bitrate),
-                "noise-sensitivity": "4",
-                "overshoot-pct": "15",
-                "partitions": "0",  # VP8_ONE_TOKENPARTITION
-                "static-thresh": "1",
-                "undershoot-pct": "100",
+                "noise-sensitivity": "2",  # Lower = less denoising = more bitrate (was 4)
+                "overshoot-pct": "25",  # Allow more overshoot = higher quality (was 15)
+                "partitions": "0",  # VP8_ONE_TOKENPARTITION  
+                "static-thresh": "0",  # Disable static threshold = more motion vectors (was 1)
+                "undershoot-pct": "50",  # Allow less undershoot = maintain quality (was 100)
+                # Additional quality settings
+                "crf": "16",  # Lower CRF = higher quality (range 4-63, default ~32)
+                "auto-alt-ref": "0",  # Disable alt-ref for consistent bitrate
             }
             self.codec.thread_count = number_of_threads(
                 frame.width * frame.height, multiprocessing.cpu_count()

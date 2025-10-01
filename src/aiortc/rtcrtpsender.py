@@ -123,6 +123,17 @@ class RTCRtpSender:
         # Initialize congestion control for sender-side loss feedback
         cc_algorithm = os.getenv("AIORTC_CC", "remb")
         self.__cc_controller = create_controller(cc_algorithm)
+        print(f"[SENDER] Created CC controller: {cc_algorithm} -> {type(self.__cc_controller).__name__}")
+
+        # Evaluation knobs
+        try:
+            self.__eval_force_encoder = int(os.getenv("EVAL_FORCE_ENCODER", "0"))
+        except Exception:
+            self.__eval_force_encoder = 0
+        try:
+            self.__eval_target_bps = int(os.getenv("EVAL_TARGET_BPS", "0"))
+        except Exception:
+            self.__eval_target_bps = 0
 
         # stats
         self.__lsr: Optional[int] = None
@@ -132,6 +143,8 @@ class RTCRtpSender:
         self.__octet_count = 0
         self.__packet_count = 0
         self.__rtt: Optional[float] = None
+        # last REMB received from receiver (bps) for logging / Ar
+        self.__last_remb_bitrate: Optional[int] = None
 
         # logging
         self.__log_debug: Callable[..., None] = lambda *args: None
@@ -277,13 +290,89 @@ class RTCRtpSender:
                     )
                 )
                 
-                # Feed loss information to congestion control
+                # Feed loss information to congestion control and optionally log
                 self.__cc_controller.on_receiver_report(report.fraction_lost)
+
+                # Optional lightweight loss logging for experiments
+                # Enable by setting env var RTCP_LOSS_LOG to a file path
+                try:
+                    loss_log_path = os.getenv("RTCP_LOSS_LOG")
+                    if loss_log_path:
+                        # fraction_lost is 0..255 per RFC
+                        loss_pct = (report.fraction_lost / 255.0) * 100.0
+                        with open(loss_log_path, "a", encoding="utf-8") as f:
+                            f.write(
+                                f"loss={report.fraction_lost}/255 ({loss_pct:.1f}%), "
+                                f"rtt_ms={(self.__rtt or 0)*1000:.1f}, "
+                                f"time={time.time():.3f}\n"
+                            )
+                except Exception:
+                    # Never let logging affect media path
+                    pass
                 
                 # Update encoder bitrate based on CC decision
-                target_bitrate = self.__cc_controller.target_bitrate()
-                if target_bitrate and self.__encoder and hasattr(self.__encoder, "target_bitrate"):
-                    self.__encoder.target_bitrate = target_bitrate
+                # Prefer combined min(Ar from REMB, As from loss controller)
+                combined_target = None
+                try:
+                    as_bps = None
+                    if hasattr(self.__cc_controller, "estimates"):
+                        _ar_unused, as_bps, _a_unused = self.__cc_controller.estimates()  # type: ignore[attr-defined]
+                    ar_bps = self.__last_remb_bitrate
+                    if as_bps and ar_bps:
+                        combined_target = min(ar_bps, as_bps)
+                    elif ar_bps:
+                        combined_target = ar_bps
+                    elif as_bps:
+                        combined_target = as_bps
+                    
+                    # Log GCC estimates for analysis
+                    try:
+                        gcc_log_path = os.getenv("GCC_ESTIMATES_LOG")
+                        if gcc_log_path and (as_bps or ar_bps):
+                            with open(gcc_log_path, "a", encoding="utf-8") as f:
+                                timestamp_s = time.time()
+                                f.write(f"{timestamp_s:.3f}, {as_bps or 0}, {ar_bps or 0}, {combined_target or 0}\n")
+                    except Exception:
+                        # Never let logging affect media path
+                        pass
+                except Exception:
+                    combined_target = None
+
+                # Fallback to controller-supplied target (may be None on sender)
+                if combined_target is None:
+                    target_bitrate = self.__cc_controller.target_bitrate()
+                    combined_target = target_bitrate
+
+                if combined_target and self.__encoder and hasattr(self.__encoder, "target_bitrate"):
+                    old_target = getattr(self.__encoder, "target_bitrate", "unknown")
+                    self.__encoder.target_bitrate = combined_target
+
+                # If evaluation mode requests forcing encoder rate, apply it last
+                if (
+                    self.__eval_force_encoder
+                    and self.__eval_target_bps > 0
+                    and self.__encoder
+                    and hasattr(self.__encoder, "target_bitrate")
+                ):
+                    self.__encoder.target_bitrate = self.__eval_target_bps
+
+                # Optional estimates logging (A/Ar/As) to same file as RTCP loss log
+                try:
+                    loss_log_path = os.getenv("RTCP_LOSS_LOG")
+                    log_est = os.getenv("EVAL_LOG_ESTIMATES", "0")
+                    if loss_log_path and log_est not in ("", "0", "false", "False"):
+                        # Prefer REMB as Ar on the sender side; compute A = min(Ar, As)
+                        last_ar = self.__last_remb_bitrate or 0
+                        as_bps = 0
+                        if hasattr(self.__cc_controller, "estimates"):
+                            _ar_unused, as_bps, _a_unused = self.__cc_controller.estimates()  # type: ignore[attr-defined]
+                        computed_a = min(last_ar, as_bps) if last_ar and as_bps else 0
+                        with open(loss_log_path, "a", encoding="utf-8") as f:
+                            f.write(
+                                f"A={computed_a}, Ar={last_ar}, As={as_bps}, time={time.time():.3f}\n"
+                            )
+                except Exception:
+                    pass
         elif isinstance(packet, RtcpRtpfbPacket) and packet.fmt == RTCP_RTPFB_NACK:
             for seq in packet.lost:
                 await self._retransmit(seq)
@@ -296,9 +385,12 @@ class RTCRtpSender:
                     self.__log_debug(
                         "- receiver estimated maximum bitrate %d bps", bitrate
                     )
+                    # Remember last REMB for logging A/Ar/As (but don't print noise)
+                    self.__last_remb_bitrate = bitrate
                     if self.__encoder and hasattr(self.__encoder, "target_bitrate"):
                         self.__encoder.target_bitrate = bitrate
-            except ValueError:
+            except ValueError as e:
+                print(f"[SENDER] Failed to unpack REMB: {e}")
                 pass
 
     async def _next_encoded_frame(
@@ -328,6 +420,17 @@ class RTCRtpSender:
             payloads, timestamp = await self.__loop.run_in_executor(
                 None, self.__encoder.encode, data, force_keyframe
             )
+            # If evaluation flag requests forcing encoder bitrate, ensure it sticks even after encoder (re)init
+            if (
+                self.__eval_force_encoder
+                and self.__eval_target_bps > 0
+                and hasattr(self.__encoder, "target_bitrate")
+            ):
+                try:
+                    # apply without throwing if unsupported
+                    self.__encoder.target_bitrate = self.__eval_target_bps
+                except Exception:
+                    pass
         else:
             # Pack the pre-encoded data.
             payloads, timestamp = self.__encoder.pack(data)
@@ -356,6 +459,9 @@ class RTCRtpSender:
 
             self.__log_debug("> %s", packet)
             packet_bytes = packet.serialize(self.__rtp_header_extensions_map)
+            
+
+            
             await self.transport._send_rtp(packet_bytes)
 
     def _send_keyframe(self) -> None:
@@ -487,6 +593,8 @@ class RTCRtpSender:
         for packet in packets:
             self.__log_debug("> %s", packet)
             payload += bytes(packet)
+
+
 
         try:
             await self.transport._send_rtp(payload)

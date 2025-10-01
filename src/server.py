@@ -170,9 +170,9 @@ class ResponseAudioTrack(MediaStreamTrack):
             try:
                 # Try to get frame from current response player
                 frame = await self._current_player.audio.recv()
-                #print(f"🎵 Playing response frame {self._timestamp}")
+                #print(f"Playing response frame {self._timestamp}")
             except Exception as e:
-                #print(f"⚠️ Response playback finished or error: {e}")
+                #print(f"Response playback finished or error: {e}")
                 self._is_playing_response = False
                 self._current_player = None
                 frame = self._generate_silence()
@@ -180,7 +180,7 @@ class ResponseAudioTrack(MediaStreamTrack):
             # Generate silence
             frame = self._generate_silence()
             # if self._silence_frames_sent % 50 == 0:  # Log every ~1 second
-            #     print(f"🔇 Silence frame {self._silence_frames_sent}")
+            #     print(f"Silence frame {self._silence_frames_sent}")
             self._silence_frames_sent += 1
         
         # Set timing properties
@@ -212,18 +212,18 @@ class ResponseAudioTrack(MediaStreamTrack):
     def play_response(self, audio_file_path):
         """Switch to playing a response audio file"""
         try:
-            print(f"🎵 Switching to response: {audio_file_path}")
+            print(f"Switching to response: {audio_file_path}")
             self._current_player = MediaPlayer(audio_file_path)
             self._is_playing_response = True
             self._silence_frames_sent = 0
         except Exception as e:
-            print(f"❌ Failed to load response audio: {e}")
+            print(f"Failed to load response audio: {e}")
             self._is_playing_response = False
             self._current_player = None
     
     def stop_response(self):
         """Switch back to silence"""
-        print("🔇 Switching back to silence")
+        print("Switching back to silence")
         self._is_playing_response = False
         if self._current_player:
             self._current_player = None
@@ -324,11 +324,11 @@ async def offer(request):
                         
                         # Use our custom track to play the response
                         if hasattr(pc, 'response_track'):
-                            print(f"🎵 Triggering response playback: {response_file}")
+                            print(f"Triggering response playback: {response_file}")
                             pc.response_track.play_response(response_file)
-                            print("📊 Watch WebRTC-internals inbound-rtp bytesReceived for audio!")
+                            #print("Watch WebRTC-internals inbound-rtp bytesReceived for audio!")
                         else:
-                            print("❌ No response track available")
+                            print("No response track available")
                         
                         # Delete file immediately after successful transcription
                         print(f"Deleting audio file: {wav_path}")
@@ -415,6 +415,10 @@ if __name__ == "__main__":
         choices=["remb", "gcc-v0"],
         help="Congestion control algorithm (default: remb)"
     )
+    parser.add_argument(
+        "--target-bitrate", type=int, default=None,
+        help="Evaluation: Target bitrate in bps (e.g. 3000000 for 3 Mbps)."
+    )
     parser.add_argument("--verbose", "-v", action="count")
     args = parser.parse_args()
 
@@ -425,7 +429,11 @@ if __name__ == "__main__":
     
     # Set congestion control algorithm via environment variable
     os.environ["AIORTC_CC"] = args.cc
-    print(f"Using congestion control algorithm: {args.cc}")
+    if args.target_bitrate:
+        os.environ["EVAL_TARGET_BPS"] = str(args.target_bitrate)
+        print(f"Using congestion control algorithm: {args.cc}, target={args.target_bitrate} bps")
+    else:
+        print(f"Using congestion control algorithm: {args.cc}")
 
     if args.cert_file:
         ssl_context = ssl.SSLContext()
